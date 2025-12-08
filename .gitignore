@@ -1,0 +1,5 @@
+#Commentaire pour ignorer le fichier
+
+.venv
+.env
+__pycache__
