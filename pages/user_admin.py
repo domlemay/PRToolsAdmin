@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional, List
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -12,11 +12,13 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QAbstractItemView,
+    QStackedWidget,
 )
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from database import fetch_premier_repondants, fetch_premier_repondant
 from windows.info_user import InfoUtilisateurWindow
+from windows.add_user import AddUtilisateurWindow
 
 
 class PageUserAdmin(QWidget):
@@ -69,7 +71,7 @@ class PageUserAdmin(QWidget):
         self.btn_refresh.clicked.connect(self.load_premiers_repondants)
 
         # Thread de chargement
-        self._load_thread: QThread | None = None
+        self._load_thread: Optional[QThread] = None
 
         # Charger les données au démarrage
         self.load_premiers_repondants()
@@ -79,53 +81,66 @@ class PageUserAdmin(QWidget):
     # ------------------------------------------------------------------
 
     def ajouter_utilisateur(self):
-        """Ouvre la fenêtre pour saisir les informations d'un nouvel utilisateur
-        et l'ajoute à la table.
-        """
-        prenom, ok = QInputDialog.getText(self, "Prénom", "Entrez le prénom :")
-        if not ok or not prenom:
-            return
+        """Ouvre la fenêtre d'ajout (remplaçant la page si possible) et traite le nouvel utilisateur."""
 
-        nom, ok = QInputDialog.getText(self, "Nom", "Entrez le nom :")
-        if not ok or not nom:
-            return
+        # trouver QStackedWidget ancêtre
+        stack = None
+        parent_widget = self.parentWidget()
+        while parent_widget is not None:
+            if isinstance(parent_widget, QStackedWidget):
+                stack = parent_widget
+                break
+            parent_widget = parent_widget.parentWidget()
 
-        email, ok = QInputDialog.getText(self, "Email", "Entrez l'email :")
-        if not ok:
-            email = ""
+        def _handle_new_user(user: Dict[str, object]):
+            try:
+                # ajouter dans la table UI immédiatement
+                self.ajouter_ligne_table(user)
+            except Exception:
+                pass
+            try:
+                # rafraîchir depuis la source (si nécessaire)
+                self.load_premiers_repondants()
+            except Exception:
+                pass
 
-        cellulaire, ok = QInputDialog.getText(self, "Cellulaire", "Entrez le cellulaire :")
-        if not ok:
-            cellulaire = ""
+        if isinstance(stack, QStackedWidget):
+            add_widget = AddUtilisateurWindow(parent=stack)
+            add_widget.user_added.connect(_handle_new_user)
 
-        no_pr, ok = QInputDialog.getText(self, "No. PR", "Entrez le numéro PR :")
-        if not ok:
-            no_pr = ""
+            def _on_closed_add():
+                try:
+                    stack.setCurrentWidget(self)
+                except Exception:
+                    pass
+                try:
+                    stack.removeWidget(add_widget)
+                    add_widget.deleteLater()
+                except Exception:
+                    pass
+                try:
+                    # assurer actualisation
+                    self.load_premiers_repondants()
+                except Exception:
+                    pass
 
-        actif_item, ok = QInputDialog.getItem(
-            self,
-            "Actif",
-            "Utilisateur actif ?",
-            ["Oui", "Non"],
-            0,
-            False,
-        )
-        actif = actif_item == "Oui" if ok else False
+            add_widget.on_closed = _on_closed_add
+            stack.addWidget(add_widget)
+            stack.setCurrentWidget(add_widget)
+            add_widget.show()
+        else:
+            # fallback : fenêtre indépendante
+            self._add_window = AddUtilisateurWindow(self)
+            self._add_window.user_added.connect(_handle_new_user)
 
-        # IMPORTANT : on utilise les mêmes clés que la BD
-        # Adapte ces noms aux colonnes réelles de ta table premier_repondant.
-        pr: Dict[str, object] = {
-            "prenom": prenom,
-            "nom": nom,
-            "email": email,
-            "cellulaire": cellulaire,
-            "numero_pr": no_pr,   # ou "matricule" si ta colonne s'appelle comme ça
-            "actif": actif,
-        }
+            def _on_closed_fallback():
+                try:
+                    self.load_premiers_repondants()
+                except Exception:
+                    pass
 
-        # Pour l'instant : uniquement dans la table UI.
-        # Plus tard : on fera un INSERT en BD ici.
-        self.ajouter_ligne_table(pr)
+            self._add_window.on_closed = _on_closed_fallback
+            self._add_window.show()
 
     def ajouter_ligne_table(self, pr: Dict[str, object]):
         """Ajoute une ligne au tableau des PR à partir d'un dict."""
@@ -248,9 +263,54 @@ class PageUserAdmin(QWidget):
             QMessageBox.information(self, "Non trouvé", "Aucun utilisateur trouvé en base pour ce numéro PR.")
             return
 
-        # Conserver la fenêtre pour éviter qu'elle soit garbage-collected
-        self._info_window = InfoUtilisateurWindow(self)
-        self._info_window.show_user(full_user)
-        self._info_window.show()
+        # Rechercher un QStackedWidget ancêtre pour remplacer la page; fallback à une fenêtre indépendante
+        stack = None
+        parent_widget = self.parentWidget()
+        while parent_widget is not None:
+            if isinstance(parent_widget, QStackedWidget):
+                stack = parent_widget
+                break
+            parent_widget = parent_widget.parentWidget()
+
+        if isinstance(stack, QStackedWidget):
+            info_widget = InfoUtilisateurWindow(parent=stack, on_saved=self.load_premiers_repondants)
+
+            # callback pour restaurer la page et retirer le widget info
+            def _on_closed():
+                try:
+                    # retourner sur la page admin
+                    stack.setCurrentWidget(self)
+                except Exception:
+                    pass
+                try:
+                    stack.removeWidget(info_widget)
+                    info_widget.deleteLater()
+                except Exception:
+                    pass
+                try:
+                    # Forcer l'actualisation du tableau après fermeture
+                    self.load_premiers_repondants()
+                except Exception:
+                    pass
+
+            info_widget.on_closed = _on_closed
+
+            stack.addWidget(info_widget)
+            stack.setCurrentWidget(info_widget)
+            info_widget.show_user(full_user)
+        else:
+            # fallback : ouvrir comme fenêtre indépendante
+            self._info_window = InfoUtilisateurWindow(self, on_saved=self.load_premiers_repondants)
+
+            # s'assurer que la fermeture provoque une actualisation
+            def _on_closed_fallback():
+                try:
+                    self.load_premiers_repondants()
+                except Exception:
+                    pass
+
+            self._info_window.on_closed = _on_closed_fallback
+            self._info_window.show_user(full_user)
+            self._info_window.show()
 
 
