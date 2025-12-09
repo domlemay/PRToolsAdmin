@@ -1,3 +1,5 @@
 psycopg[binary]
 python-dotenv
 pytest
+PyQt6
+passlib[bcrypt]
